@@ -1045,7 +1045,7 @@ object PythonCompiler extends LanguageCompilerStatic
 
       // Enum types
       case et: EnumType =>
-        val enumName = type2class(et.enumSpec.get.name.last)
+        val enumName = types2class(et.enumSpec.get.name, et.isExternal(classTypeProvider.nowClass))
         s"'$enumName'"
 
       // Stream types
