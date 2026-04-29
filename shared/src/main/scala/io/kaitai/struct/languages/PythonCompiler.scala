@@ -101,6 +101,7 @@ class PythonCompiler(typeProvider: ClassTypeProvider, config: RuntimeConfig)
 
   override def classConstructorHeader(name: String, parentType: DataType, rootClassName: String, isHybrid: Boolean, params: List[ParamDefSpec]): Unit = {
     implicit val provider: ClassTypeProvider = typeProvider
+    implicit val readWrite: Boolean = config.readWrite
 
     // Build parameter list with type annotations if enabled
     val paramsList = if (config.pythonTypeAnnotations) {
@@ -117,8 +118,8 @@ class PythonCompiler(typeProvider: ClassTypeProvider, config: RuntimeConfig)
     val ioDefaultVal = if (config.readWrite) "=None" else ""
     if (config.pythonTypeAnnotations) {
       val endianAdd = if (isHybrid) ", _is_le: Optional[bool] = None" else ""
-      val parentTypeStr = if (name == rootClassName) "'KaitaiStruct'" else "Optional['KaitaiStruct']"
-      out.puts(s"def __init__(self$paramsList, _io: 'KaitaiStream'$ioDefaultVal, _parent: $parentTypeStr = None, _root: Optional['KaitaiStruct'] = None$endianAdd) -> None:")
+      val parentTypeStr = if (name == rootClassName) kstructNameFull else s"Optional[$kstructNameFull]"
+      out.puts(s"def __init__(self$paramsList, _io: $kstreamName$ioDefaultVal, _parent: $parentTypeStr = None, _root: Optional[$kstructNameFull] = None$endianAdd) -> None:")
     } else {
       val endianAdd = if (isHybrid) ", _is_le=None" else ""
       out.puts(s"def __init__(self$paramsList, _io$ioDefaultVal, _parent=None, _root=None$endianAdd):")
@@ -128,11 +129,11 @@ class PythonCompiler(typeProvider: ClassTypeProvider, config: RuntimeConfig)
 
     // Add type annotations for instance variables if enabled
     if (config.pythonTypeAnnotations) {
-      out.puts(s"self._parent: ${if (name == rootClassName) "'KaitaiStruct'" else "Optional['KaitaiStruct']"} = _parent")
+      out.puts(s"self._parent: ${if (name == rootClassName) kstructNameFull else s"Optional[$kstructNameFull]"} = _parent")
       if (name == rootClassName) {
-        out.puts("self._root: 'KaitaiStruct' = _root or self")
+        out.puts(s"self._root: $kstructNameFull = _root or self")
       } else {
-        out.puts("self._root: Optional['KaitaiStruct'] = _root")
+        out.puts(s"self._root: Optional[$kstructNameFull] = _root")
       }
 
       if (isHybrid)
@@ -163,6 +164,7 @@ class PythonCompiler(typeProvider: ClassTypeProvider, config: RuntimeConfig)
       out.puts("# Attribute type declarations")
       attributeTypes.foreach { case (attrName, (dataType, isNullable)) =>
         implicit val provider: ClassTypeProvider = typeProvider
+        implicit val readWrite: Boolean = config.readWrite
         val typeStr = PythonCompiler.kaitaiTypeToPythonType(dataType, isNullable)
         val privateAttrName = idToStr(NamedIdentifier(attrName))
         out.puts(s"self.$privateAttrName: $typeStr")
@@ -773,6 +775,7 @@ class PythonCompiler(typeProvider: ClassTypeProvider, config: RuntimeConfig)
     out.puts("@property")
     if (config.pythonTypeAnnotations) {
       implicit val provider: ClassTypeProvider = typeProvider
+      implicit val readWrite: Boolean = config.readWrite
       val typeStr = PythonCompiler.kaitaiTypeToPythonType(dataType, isNullable)
       out.puts(s"def ${publicMemberName(instName)}(self) -> $typeStr:")
     } else {
@@ -1028,8 +1031,10 @@ object PythonCompiler extends LanguageCompilerStatic
   /**
     * Maps Kaitai data types to Python type annotation strings
     */
-  def kaitaiTypeToPythonType(dataType: DataType, isNullable: Boolean = false)(implicit classTypeProvider: ClassTypeProvider): String = {
+  def kaitaiTypeToPythonType(dataType: DataType, isNullable: Boolean = false)(implicit classTypeProvider: ClassTypeProvider, readWrite: Boolean): String = {
     def wrapNullable(t: String): String = if (isNullable) s"Optional[$t]" else t
+
+    var kstructNameFull = if (readWrite) s"ReadWrite$kstructName" else kstructName
 
     val baseType = dataType match {
       // Primitive types
@@ -1051,20 +1056,16 @@ object PythonCompiler extends LanguageCompilerStatic
         s"'$enumName'"
 
       // Stream types
-      case OwnedKaitaiStreamType => "'KaitaiStream'"
-      case KaitaiStreamType => "'KaitaiStream'"
-      case KaitaiStructType => "'KaitaiStruct'"
-      case _: CalcKaitaiStructType => "'KaitaiStruct'"
+      case OwnedKaitaiStreamType => kstreamName
+      case KaitaiStreamType => kstreamName
+      case KaitaiStructType => kstructNameFull
+      case _: CalcKaitaiStructType => kstructNameFull
 
       // Switch types - we'll use Union for these
       case st: SwitchType =>
         val types = st.cases.values.toSet
-        if (types.size == 1) {
-          kaitaiTypeToPythonType(types.head)
-        } else {
-          val typeStrs = types.map(kaitaiTypeToPythonType(_)).mkString(", ")
-          s"Union[$typeStrs]"
-        }
+        val typeStrs = types.map(kaitaiTypeToPythonType(_)).mkString(", ")
+        s"Union[$typeStrs]"
 
       // Any type
       case AnyType => "Any"
@@ -1091,6 +1092,7 @@ object PythonCompiler extends LanguageCompilerStatic
 
   override def kstreamName: String = "KaitaiStream"
   override def kstructName: String = "KaitaiStruct"
+
   override def ksErrorName(err: KSError): String = err match {
     case EndOfStreamError => "EOFError"
     case ConversionError => "ValueError"
