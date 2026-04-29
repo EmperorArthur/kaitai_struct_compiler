@@ -21,8 +21,7 @@ class PythonCompiler(typeProvider: ClassTypeProvider, config: RuntimeConfig)
     with GenericChecks
     with AllocateIOLocalVar
     with UniversalDoc
-    with SwitchOps
-    with NoNeedForFullClassPath {
+    with SwitchOps {
 
   import PythonCompiler._
 
@@ -30,7 +29,6 @@ class PythonCompiler(typeProvider: ClassTypeProvider, config: RuntimeConfig)
 
   // Track attribute types for type annotation generation
   private val attributeTypes = scala.collection.mutable.Map[String, (DataType, Boolean)]()
-  private var currentClassName: String = ""
 
   override def innerDocstrings = true
 
@@ -92,25 +90,24 @@ class PythonCompiler(typeProvider: ClassTypeProvider, config: RuntimeConfig)
   override def externalTypeDeclaration(extType: ExternalType): Unit =
     PythonCompiler.externalTypeDeclaration(extType, importList, config)
 
-  override def classHeader(name: String): Unit = {
-    currentClassName = name
+  override def classHeader(name: List[String]): Unit = {
     attributeTypes.clear()
     // Supress warnings for generated code.
     // https://www.jetbrains.com/help/pycharm/disabling-and-enabling-inspections.html#comments-ref
     out.puts(s"# noinspection PyProtectedMember") // Kaitai Struct underscores do not mean 'protected' as in Python
     out.puts(s"# noinspection PyAttributeOutsideInit") // Caching and write checks rely on this
-    out.puts(s"class ${type2class(name)}($kstructNameFull):")
+    out.puts(s"class ${type2class(name.last)}($kstructNameFull):")
     out.inc
   }
 
-  override def classConstructorHeader(name: String, parentType: DataType, rootClassName: String, isHybrid: Boolean, params: List[ParamDefSpec]): Unit = {
-    implicit val provider: ClassTypeProvider = typeProvider
-    implicit val readWrite: Boolean = config.readWrite
+  def classFooter(name: List[String]): Unit =
+    classFooter(name.last)
 
+  override def classConstructorHeader(name: List[String], parentType: DataType, rootClassName: List[String], isHybrid: Boolean, params: List[ParamDefSpec]): Unit = {
     // Build parameter list with type annotations if enabled
     val paramsList = if (config.pythonTypeAnnotations) {
       val paramsWithTypes = params.map { p =>
-        val paramType = PythonCompiler.kaitaiTypeToPythonType(p.dataType)
+        val paramType = kaitaiTypeToPythonType(p.dataType)
         s"${paramName(p.id)}: $paramType"
       }
       Utils.join(paramsWithTypes, ", ", ", ", "")
@@ -118,12 +115,17 @@ class PythonCompiler(typeProvider: ClassTypeProvider, config: RuntimeConfig)
       Utils.join(params.map((p) => paramName(p.id)), ", ", ", ", "")
     }
 
+    val rootType = CalcUserType(rootClassName, None)
+    rootType.classSpec = Option(typeProvider.nowClass)
+
+    val tParent = kaitaiTypeToPythonType(parentType, true)
+    val tRoot = kaitaiTypeToPythonType(rootType, false)
+
     // Build constructor signature with type annotations
     val ioDefaultVal = if (config.readWrite) "=None" else ""
     if (config.pythonTypeAnnotations) {
       val endianAdd = if (isHybrid) ", _is_le: Optional[bool] = None" else ""
-      val parentTypeStr = if (name == rootClassName) kstructNameFull else s"Optional[$kstructNameFull]"
-      out.puts(s"def __init__(self$paramsList, _io: $kstreamName$ioDefaultVal, _parent: $parentTypeStr = None, _root: Optional[$kstructNameFull] = None$endianAdd) -> None:")
+      out.puts(s"def __init__(self$paramsList, _io: $kstreamName$ioDefaultVal, _parent: $tParent = None, _root: Optional[$tRoot] = None$endianAdd) -> None:")
     } else {
       val endianAdd = if (isHybrid) ", _is_le=None" else ""
       out.puts(s"def __init__(self$paramsList, _io$ioDefaultVal, _parent=None, _root=None$endianAdd):")
@@ -133,11 +135,11 @@ class PythonCompiler(typeProvider: ClassTypeProvider, config: RuntimeConfig)
 
     // Add type annotations for instance variables if enabled
     if (config.pythonTypeAnnotations) {
-      out.puts(s"self._parent: ${if (name == rootClassName) kstructNameFull else s"Optional[$kstructNameFull]"} = _parent")
+      out.puts(s"self._parent: $tParent = _parent")
       if (name == rootClassName) {
-        out.puts(s"self._root: $kstructNameFull = _root or self")
+        out.puts(s"self._root: $tRoot = _root or self")
       } else {
-        out.puts(s"self._root: Optional[$kstructNameFull] = _root")
+        out.puts(s"self._root: Optional[$tRoot] = _root")
       }
 
       if (isHybrid)
@@ -167,9 +169,7 @@ class PythonCompiler(typeProvider: ClassTypeProvider, config: RuntimeConfig)
       out.puts
       out.puts("# Attribute type declarations")
       attributeTypes.foreach { case (attrName, (dataType, isNullable)) =>
-        implicit val provider: ClassTypeProvider = typeProvider
-        implicit val readWrite: Boolean = config.readWrite
-        val typeStr = PythonCompiler.kaitaiTypeToPythonType(dataType, isNullable)
+        val typeStr = kaitaiTypeToPythonType(dataType, isNullable)
         val privateAttrName = idToStr(NamedIdentifier(attrName))
         out.puts(s"self.$privateAttrName: $typeStr")
       }
@@ -763,12 +763,10 @@ class PythonCompiler(typeProvider: ClassTypeProvider, config: RuntimeConfig)
 
   override def instanceEnabledSetter(instName: InstanceIdentifier): Unit = {}
 
-  override def instanceHeader(className: String, instName: InstanceIdentifier, dataType: DataType, isNullable: Boolean): Unit = {
+  override def instanceHeader(className: List[String], instName: InstanceIdentifier, dataType: DataType, isNullable: Boolean): Unit = {
     out.puts("@property")
     if (config.pythonTypeAnnotations) {
-      implicit val provider: ClassTypeProvider = typeProvider
-      implicit val readWrite: Boolean = config.readWrite
-      val typeStr = PythonCompiler.kaitaiTypeToPythonType(dataType, isNullable)
+      val typeStr = kaitaiTypeToPythonType(dataType, isNullable)
       out.puts(s"def ${publicMemberName(instName)}(self) -> $typeStr:")
     } else {
       out.puts(s"def ${publicMemberName(instName)}(self):")
@@ -821,13 +819,13 @@ class PythonCompiler(typeProvider: ClassTypeProvider, config: RuntimeConfig)
     out.puts
   }
 
-  override def enumDeclaration(curClass: String, enumName: String, enumColl: Seq[(Long, String)]): Unit = {
+  override def enumDeclaration(curClass: List[String], enumName: String, enumColl: Seq[(Long, EnumValueSpec)]): Unit = {
     importList.add("from enum import IntEnum")
 
     out.puts
     out.puts(s"class ${type2class(enumName)}(IntEnum):")
     out.inc
-    enumColl.foreach { case (id: Long, label: String) => out.puts(s"$label = ${translator.doIntLiteral(id)}") }
+    enumColl.foreach { case (id: Long, label: EnumValueSpec) => out.puts(s"${label.name} = ${translator.doIntLiteral(id)}") }
     out.dec
   }
 
@@ -963,6 +961,9 @@ class PythonCompiler(typeProvider: ClassTypeProvider, config: RuntimeConfig)
 
   override def ksErrorName(err: KSError): String = PythonCompiler.ksErrorName(err)
 
+  def kaitaiTypeToPythonType(attrType: DataType, isNullable: Boolean = false): String =
+    PythonCompiler.kaitaiTypeToPythonType(attrType, isNullable, typeProvider, config)
+
   override def attrValidateExpr(
     attr: AttrLikeSpec,
     checkExpr: Ast.expr,
@@ -1024,10 +1025,10 @@ object PythonCompiler extends LanguageCompilerStatic
   /**
     * Maps Kaitai data types to Python type annotation strings
     */
-  def kaitaiTypeToPythonType(dataType: DataType, isNullable: Boolean = false)(implicit classTypeProvider: ClassTypeProvider, readWrite: Boolean): String = {
+  def kaitaiTypeToPythonType(dataType: DataType, isNullable: Boolean, classTypeProvider: ClassTypeProvider, config: RuntimeConfig): String = {
     def wrapNullable(t: String): String = if (isNullable) s"Optional[$t]" else t
 
-    var kstructNameFull = if (readWrite) s"ReadWrite$kstructName" else kstructName
+    var kstructNameFull = if (config.readWrite) s"ReadWrite$kstructName" else kstructName
 
     val baseType = dataType match {
       // Primitive types
@@ -1038,7 +1039,7 @@ object PythonCompiler extends LanguageCompilerStatic
       case _: StrType => "str"
 
       // Complex types
-      case at: ArrayType => s"List[${kaitaiTypeToPythonType(at.elType)}]"
+      case at: ArrayType => s"List[${kaitaiTypeToPythonType(at.elType, false, classTypeProvider, config)}]"
       case ut: UserType =>
         val typeName = types2class(ut.classSpec.get.name, ut.isExternal(classTypeProvider.nowClass))
         s"'$typeName'"  // Use forward reference to handle circular dependencies
@@ -1057,7 +1058,7 @@ object PythonCompiler extends LanguageCompilerStatic
       // Switch types - we'll use Union for these
       case st: SwitchType =>
         val types = st.cases.values.toSet
-        val typeStrs = types.map(kaitaiTypeToPythonType(_)).mkString(", ")
+        val typeStrs = types.map(kaitaiTypeToPythonType(_, false, classTypeProvider, config)).mkString(", ")
         s"Union[$typeStrs]"
 
       // Any type
