@@ -21,7 +21,7 @@ class PythonCompiler(typeProvider: ClassTypeProvider, config: RuntimeConfig)
     with GenericChecks
     with AllocateIOLocalVar
     with UniversalDoc
-    with SwitchIfOps
+    with SwitchOps
     with NoNeedForFullClassPath {
 
   import PythonCompiler._
@@ -95,6 +95,10 @@ class PythonCompiler(typeProvider: ClassTypeProvider, config: RuntimeConfig)
   override def classHeader(name: String): Unit = {
     currentClassName = name
     attributeTypes.clear()
+    // Supress warnings for generated code.
+    // https://www.jetbrains.com/help/pycharm/disabling-and-enabling-inspections.html#comments-ref
+    out.puts(s"# noinspection PyProtectedMember") // Kaitai Struct underscores do not mean 'protected' as in Python
+    out.puts(s"# noinspection PyAttributeOutsideInit") // Caching and write checks rely on this
     out.puts(s"class ${type2class(name)}($kstructNameFull):")
     out.inc
   }
@@ -720,39 +724,27 @@ class PythonCompiler(typeProvider: ClassTypeProvider, config: RuntimeConfig)
     out.dec
   }
 
-  override def switchStart(id: Identifier, on: Ast.expr): Unit = {}
-  override def switchCaseStart(condition: Ast.expr): Unit = {}
-  override def switchCaseEnd(): Unit = {}
-  override def switchElseStart(): Unit = {}
-  override def switchEnd(): Unit = {}
-
-  override def switchRequiresIfs(onType: DataType): Boolean = true
-  override def switchIfStart(id: Identifier, on: Ast.expr, onType: DataType): Unit = {
-    out.puts(s"_on = ${expression(on)}")
+  override def switchStart(id: Identifier, on: Ast.expr): Unit = {
+    out.puts(s"match ${expression(on)}:")
+    out.inc
   }
 
-  override def switchIfCaseFirstStart(condition: Ast.expr): Unit = {
-    out.puts(s"if _on == ${expression(condition)}:")
+  override def switchCaseStart(condition: Ast.expr): Unit = {
+    out.puts(s"case ${expression(condition)}:")
     out.inc
     out.puts("pass")
   }
-
-  override def switchIfCaseStart(condition: Ast.expr): Unit = {
-    out.puts(s"elif _on == ${expression(condition)}:")
-    out.inc
-    out.puts("pass")
-  }
-
-  override def switchIfCaseEnd(): Unit =
+  override def switchCaseEnd(): Unit = {
     out.dec
-
-  override def switchIfElseStart(): Unit = {
-    out.puts(s"else:")
+  }
+  override def switchElseStart(): Unit = {
+    out.puts(s"case _:")
     out.inc
     out.puts("pass")
   }
-
-  override def switchIfEnd(): Unit = {}
+  override def switchEnd(): Unit = {
+    out.dec
+  }
 
   override def instanceWriteFlagDeclaration(attrName: InstanceIdentifier): Unit = {}
 
@@ -826,6 +818,7 @@ class PythonCompiler(typeProvider: ClassTypeProvider, config: RuntimeConfig)
     out.inc
     out.puts(s"del ${privateMemberName(instName)}")
     out.dec
+    out.puts
   }
 
   override def enumDeclaration(curClass: String, enumName: String, enumColl: Seq[(Long, String)]): Unit = {
